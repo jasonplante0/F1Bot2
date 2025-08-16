@@ -5,7 +5,8 @@ const os = require('os');
 const sharp = require('sharp');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const { BskyAgent } = require('@atproto/api');
+const { BskyAgent, RichText } = require('@atproto/api');
+const { JSDOM } = require('jsdom');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -26,6 +27,7 @@ const POSTED_IDS_FILE = 'posted_ids.json';
 const TEMP_MEDIA_DIR = path.join(os.tmpdir(), 'mastodon_media');
 const BLUESKY_IMAGE_MAX_SIZE = 1024 * 1024; // 1MB
 const BLUESKY_VIDEO_MAX_SIZE = 100 * 1024 * 1024; // 100MB
+const BLUESKY_MAX_CHARS = 300;
 
 if (!fs.existsSync(TEMP_MEDIA_DIR)) {
   fs.mkdirSync(TEMP_MEDIA_DIR, { recursive: true });
@@ -134,7 +136,20 @@ async function fetchMastodonPosts() {
   return res.json();
 }
 
-async function postToBlueSky(agent, text, mediaFiles) {
+// Convert Mastodon HTML content to plain text, preserving links/mentions using RichText
+async function mastodonToRichText(agent, html) {
+  if (!html) return null;
+  // Remove twitter.com and x.com URLs
+  html = html.replace(/https?:\/\/(www\.)?(twitter\.com|x\.com)\/[^\s<]+/gi, '');
+  // Parse HTML to text, preserving links/mentions
+  const dom = new JSDOM(html);
+  const text = dom.window.document.body.textContent || '';
+  const rt = new RichText({ text: text.trim() });
+  await rt.detectFacets(agent);
+  return rt;
+}
+
+async function postToBlueSky(agent, richText, mediaFiles) {
   let embed = undefined;
   if (mediaFiles.length > 0) {
     const uploaded = [];
@@ -156,7 +171,7 @@ async function postToBlueSky(agent, text, mediaFiles) {
         embed = {
           $type: 'app.bsky.embed.external',
           external: {
-            uri: '', // BlueSky does not support direct video upload as of now, but this is a placeholder
+            uri: '', // BlueSky may not support direct video upload; placeholder
             title: 'Video reposted from Mastodon',
             description: '',
             thumb: upload.data.blob,
@@ -173,7 +188,8 @@ async function postToBlueSky(agent, text, mediaFiles) {
   }
 
   await agent.post({
-    text,
+    text: richText.text,
+    facets: richText.facets,
     embed,
   });
 }
@@ -181,7 +197,8 @@ async function postToBlueSky(agent, text, mediaFiles) {
 (async () => {
   try {
     const posts = await fetchMastodonPosts();
-    const newPosts = posts.filter(post => !postedIds.includes(post.id));
+    // Oldest first
+    const newPosts = posts.filter(post => !postedIds.includes(post.id)).reverse();
     if (newPosts.length === 0) {
       console.log('No new posts to repost.');
       return;
@@ -190,11 +207,20 @@ async function postToBlueSky(agent, text, mediaFiles) {
     const agent = new BskyAgent({ service: 'https://bsky.social' });
     await agent.login({ identifier: BLUESKY_HANDLE, password: BLUESKY_PASSWORD });
 
-    for (const post of newPosts.reverse()) {
+    for (const post of newPosts) {
       try {
-        const text = post.content || post.spoiler_text || post.text || '';
-        const mediaFiles = [];
+        // Convert Mastodon HTML to RichText
+        const richText = await mastodonToRichText(agent, post.content || post.spoiler_text || post.text || '');
+        if (!richText || !richText.text) {
+          console.warn(`Post ${post.id} has no text after cleaning, skipping.`);
+          continue;
+        }
+        if (richText.text.length > BLUESKY_MAX_CHARS) {
+          console.warn(`Post ${post.id} exceeds ${BLUESKY_MAX_CHARS} characters, skipping.`);
+          continue;
+        }
 
+        const mediaFiles = [];
         if (post.media_attachments && post.media_attachments.length > 0) {
           for (const media of post.media_attachments) {
             try {
@@ -224,7 +250,7 @@ async function postToBlueSky(agent, text, mediaFiles) {
           }
         }
 
-        await postToBlueSky(agent, text, mediaFiles);
+        await postToBlueSky(agent, richText, mediaFiles);
 
         postedIds.push(post.id);
         savePostedIds();
