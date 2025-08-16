@@ -11,9 +11,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/your-repo-name.git"
+    "url": "https://github.com/jasonplante0/F1Bot2.git"
   },
-  "author": "Your Name <your.email@example.com>",
+  "author": "Jason Plante // GitHub Copilot",
   "license": "MIT",
   "dependencies": {
     "@atproto/api": "^0.5.0",
