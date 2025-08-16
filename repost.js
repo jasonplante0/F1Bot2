@@ -149,7 +149,7 @@ async function mastodonToRichText(agent, html) {
   return rt;
 }
 
-// BlueSky video embed (one video per post)
+// BlueSky media embed (images or one video per post)
 async function postToBlueSky(agent, richText, mediaFiles) {
   let embed = undefined;
 
@@ -163,18 +163,12 @@ async function postToBlueSky(agent, richText, mediaFiles) {
     const videoData = fs.readFileSync(videoPath);
     const videoUpload = await agent.uploadBlob(videoData, { encoding: 'video/mp4' });
 
-    // Optional: generate a thumbnail for the video (not implemented here)
-    // You can use sharp or ffmpeg to extract a frame and upload as a thumbnail
-
     embed = {
-      $type: 'app.bsky.embed.recordWithMedia',
+      $type: 'app.bsky.embed.media',
       media: {
-        $type: 'app.bsky.embed.media#main',
-        video: {
-          $type: 'app.bsky.embed.media#video',
-          video: videoUpload.data.blob,
-          alt: 'Video reposted from Mastodon'
-        }
+        $type: 'app.bsky.embed.media#video',
+        video: videoUpload.data.blob,
+        alt: 'Video reposted from Mastodon'
       }
     };
   } else if (imageFiles.length > 0) {
