@@ -3,12 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const sharp = require('sharp');
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('ffmpeg-static');
 const { BskyAgent, RichText } = require('@atproto/api');
 const { JSDOM } = require('jsdom');
-
-ffmpeg.setFfmpegPath(ffmpegPath);
 
 const {
   MASTODON_ACCESS_TOKEN,
@@ -24,14 +20,9 @@ if (!MASTODON_ACCESS_TOKEN || !MASTODON_API_URL || !MASTODON_ACCOUNT_ID || !BLUE
 }
 
 const POSTED_IDS_FILE = 'posted_ids.json';
-const TEMP_MEDIA_DIR = path.join(os.tmpdir(), 'mastodon_media');
 const BLUESKY_IMAGE_MAX_SIZE = 1024 * 1024; // 1MB
 const BLUESKY_VIDEO_MAX_SIZE = 100 * 1024 * 1024; // 100MB
 const BLUESKY_MAX_CHARS = 300;
-
-if (!fs.existsSync(TEMP_MEDIA_DIR)) {
-  fs.mkdirSync(TEMP_MEDIA_DIR, { recursive: true });
-}
 
 let postedIds = [];
 if (fs.existsSync(POSTED_IDS_FILE)) {
@@ -47,84 +38,42 @@ function savePostedIds() {
   fs.writeFileSync(POSTED_IDS_FILE, JSON.stringify(postedIds, null, 2));
 }
 
-async function downloadMedia(url, filename) {
+async function downloadMediaBuffer(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to download media: ${url}`);
-  const filePath = path.join(TEMP_MEDIA_DIR, filename);
-  const fileStream = fs.createWriteStream(filePath);
-  await new Promise((resolve, reject) => {
-    res.body.pipe(fileStream);
-    res.body.on('error', reject);
-    fileStream.on('finish', resolve);
-  });
-  return filePath;
+  return await res.buffer();
 }
 
-async function processImage(inputPath) {
-  let outputPath = inputPath;
-  let buffer = fs.readFileSync(inputPath);
+async function processImageBuffer(buffer) {
+  let processedBuffer = buffer;
   let metadata = await sharp(buffer).metadata();
 
   // Convert to JPEG if not JPEG/PNG
   let format = metadata.format;
   if (format !== 'jpeg' && format !== 'png') {
-    outputPath = inputPath.replace(/\.[^/.]+$/, '.jpg');
-    buffer = await sharp(buffer).jpeg().toBuffer();
-    fs.writeFileSync(outputPath, buffer);
+    processedBuffer = await sharp(buffer).jpeg().toBuffer();
     format = 'jpeg';
   }
 
   // Compress/resize if over 1MB
-  let size = buffer.length;
+  let size = processedBuffer.length;
   if (size > BLUESKY_IMAGE_MAX_SIZE) {
     let quality = 90;
     while (size > BLUESKY_IMAGE_MAX_SIZE && quality > 10) {
-      buffer = await sharp(buffer)
+      processedBuffer = await sharp(processedBuffer)
         .jpeg({ quality })
         .toBuffer();
-      size = buffer.length;
+      size = processedBuffer.length;
       quality -= 10;
     }
-    fs.writeFileSync(outputPath, buffer);
   }
 
   // Final check
-  if (fs.statSync(outputPath).size > BLUESKY_IMAGE_MAX_SIZE) {
-    console.warn(`Image ${inputPath} could not be compressed under 1MB, skipping.`);
+  if (processedBuffer.length > BLUESKY_IMAGE_MAX_SIZE) {
+    console.warn(`Image buffer could not be compressed under 1MB, skipping.`);
     return null;
   }
-  return outputPath;
-}
-
-async function processVideo(inputPath) {
-  const outputPath = inputPath.replace(/\.[^/.]+$/, '_bsky.mp4');
-  return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .outputOptions([
-        '-c:v libx264',
-        '-preset veryfast',
-        '-crf 28',
-        '-c:a aac',
-        '-b:a 128k',
-        '-movflags +faststart',
-        '-vf scale=\'min(1280,iw)\':-2'
-      ])
-      .output(outputPath)
-      .on('end', () => {
-        if (fs.statSync(outputPath).size > BLUESKY_VIDEO_MAX_SIZE) {
-          console.warn(`Video ${inputPath} could not be compressed under 100MB, skipping.`);
-          fs.unlinkSync(outputPath);
-          resolve(null);
-        } else {
-          resolve(outputPath);
-        }
-      })
-      .on('error', (err) => {
-        console.error(`ffmpeg error for ${inputPath}:`, err);
-        resolve(null);
-      })
-      .run();
-  });
+  return processedBuffer;
 }
 
 async function fetchMastodonPosts() {
@@ -150,19 +99,11 @@ async function mastodonToRichText(agent, html) {
 }
 
 // BlueSky media embed (images or one video per post)
-async function postToBlueSky(agent, richText, mediaFiles) {
+async function postToBlueSky(agent, richText, imageBuffers, videoBuffer) {
   let embed = undefined;
 
-  // Separate images and videos
-  const imageFiles = mediaFiles.filter(f => !f.endsWith('.mp4'));
-  const videoFiles = mediaFiles.filter(f => f.endsWith('.mp4'));
-
-  if (videoFiles.length > 0) {
-    // Only one video per post is supported
-    const videoPath = videoFiles[0];
-    const videoData = fs.readFileSync(videoPath);
-    const videoUpload = await agent.uploadBlob(videoData, { encoding: 'video/mp4' });
-
+  if (videoBuffer) {
+    const videoUpload = await agent.uploadBlob(videoBuffer, { encoding: 'video/mp4' });
     embed = {
       $type: 'app.bsky.embed.media',
       media: {
@@ -171,14 +112,11 @@ async function postToBlueSky(agent, richText, mediaFiles) {
         alt: 'Video reposted from Mastodon'
       }
     };
-  } else if (imageFiles.length > 0) {
+  } else if (imageBuffers.length > 0) {
     const uploaded = [];
-    for (const file of imageFiles) {
-      const data = fs.readFileSync(file);
-      const mimeType = file.endsWith('.png')
-        ? 'image/png'
-        : 'image/jpeg';
-      const upload = await agent.uploadBlob(data, { encoding: mimeType });
+    for (const buffer of imageBuffers) {
+      // Assume JPEG for processed images
+      const upload = await agent.uploadBlob(buffer, { encoding: 'image/jpeg' });
       uploaded.push({
         $type: 'app.bsky.embed.images#image',
         image: upload.data.blob,
@@ -224,29 +162,29 @@ async function postToBlueSky(agent, richText, mediaFiles) {
           continue;
         }
 
-        const mediaFiles = [];
+        const imageBuffers = [];
+        let videoBuffer = null;
+        let skipDueToVideo = false;
+
         if (post.media_attachments && post.media_attachments.length > 0) {
           for (const media of post.media_attachments) {
             try {
-              const ext = media.type === 'video' ? '.mp4' : path.extname(media.url) || '.jpg';
-              const filename = `${post.id}_${media.id}${ext}`;
-              const filePath = await downloadMedia(media.url, filename);
-
-              let processedPath = null;
               if (media.type === 'image') {
-                processedPath = await processImage(filePath);
+                const buffer = await downloadMediaBuffer(media.url);
+                const processedBuffer = await processImageBuffer(buffer);
+                if (processedBuffer) {
+                  imageBuffers.push(processedBuffer);
+                } else {
+                  console.warn(`Image skipped due to size/type limits.`);
+                }
               } else if (media.type === 'video') {
-                processedPath = await processVideo(filePath);
-              }
-
-              if (processedPath) {
-                mediaFiles.push(processedPath);
-              } else {
-                console.warn(`Media ${filename} skipped due to size/type limits.`);
-              }
-
-              if (processedPath && processedPath !== filePath) {
-                fs.unlinkSync(filePath);
+                const buffer = await downloadMediaBuffer(media.url);
+                if (buffer.length > BLUESKY_VIDEO_MAX_SIZE) {
+                  console.warn(`Video is too large for BlueSky (>${BLUESKY_VIDEO_MAX_SIZE} bytes). Skipping post.`);
+                  skipDueToVideo = true;
+                } else {
+                  videoBuffer = buffer;
+                }
               }
             } catch (mediaErr) {
               console.error(`Failed to process media for post ${post.id}:`, mediaErr);
@@ -254,14 +192,18 @@ async function postToBlueSky(agent, richText, mediaFiles) {
           }
         }
 
-        await postToBlueSky(agent, richText, mediaFiles);
+        if (skipDueToVideo) {
+          // Log as posted, but do not actually post to BlueSky
+          postedIds.push(post.id);
+          savePostedIds();
+          console.log(`Skipped posting Mastodon post ${post.id} to BlueSky due to video size, but marked as posted.`);
+          continue;
+        }
+
+        await postToBlueSky(agent, richText, imageBuffers, videoBuffer);
 
         postedIds.push(post.id);
         savePostedIds();
-
-        for (const file of mediaFiles) {
-          fs.unlinkSync(file);
-        }
 
         console.log(`Reposted Mastodon post ${post.id} to BlueSky.`);
       } catch (postErr) {
