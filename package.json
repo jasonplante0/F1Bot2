@@ -1,13 +1,11 @@
 {
   "name": "mastodon-to-bluesky-reposter",
   "version": "1.0.0",
-  "description": "A GitHub Action to repost Mastodon posts (text, images, videos) to BlueSky.",
+  "description": "A GitHub Action to repost Mastodon posts (text, images, videos) to BlueSky, with media processing and content cleanup.",
   "main": "repost.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node repost.js",
-    "lint": "echo \"No linter configured\"",
-    "test": "echo \"No tests specified\""
+    "start": "node repost.js"
   },
   "repository": {
     "type": "git",
@@ -20,7 +18,8 @@
     "node-fetch": "^2.6.7",
     "sharp": "^0.33.0",
     "ffmpeg-static": "^4.4.0",
-    "fluent-ffmpeg": "^2.1.2"
+    "fluent-ffmpeg": "^2.1.2",
+    "jsdom": "^24.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
