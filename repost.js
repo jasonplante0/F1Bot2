@@ -149,42 +149,52 @@ async function mastodonToRichText(agent, html) {
   return rt;
 }
 
+// BlueSky video embed (one video per post)
 async function postToBlueSky(agent, richText, mediaFiles) {
   let embed = undefined;
-  if (mediaFiles.length > 0) {
+
+  // Separate images and videos
+  const imageFiles = mediaFiles.filter(f => !f.endsWith('.mp4'));
+  const videoFiles = mediaFiles.filter(f => f.endsWith('.mp4'));
+
+  if (videoFiles.length > 0) {
+    // Only one video per post is supported
+    const videoPath = videoFiles[0];
+    const videoData = fs.readFileSync(videoPath);
+    const videoUpload = await agent.uploadBlob(videoData, { encoding: 'video/mp4' });
+
+    // Optional: generate a thumbnail for the video (not implemented here)
+    // You can use sharp or ffmpeg to extract a frame and upload as a thumbnail
+
+    embed = {
+      $type: 'app.bsky.embed.recordWithMedia',
+      media: {
+        $type: 'app.bsky.embed.media#main',
+        video: {
+          $type: 'app.bsky.embed.media#video',
+          video: videoUpload.data.blob,
+          alt: 'Video reposted from Mastodon'
+        }
+      }
+    };
+  } else if (imageFiles.length > 0) {
     const uploaded = [];
-    for (const file of mediaFiles) {
+    for (const file of imageFiles) {
       const data = fs.readFileSync(file);
-      const mimeType = file.endsWith('.mp4')
-        ? 'video/mp4'
-        : file.endsWith('.png')
+      const mimeType = file.endsWith('.png')
         ? 'image/png'
         : 'image/jpeg';
       const upload = await agent.uploadBlob(data, { encoding: mimeType });
-      if (mimeType.startsWith('image/')) {
-        uploaded.push({
-          $type: 'app.bsky.embed.images#image',
-          image: upload.data.blob,
-          alt: 'Media reposted from Mastodon',
-        });
-      } else if (mimeType === 'video/mp4') {
-        embed = {
-          $type: 'app.bsky.embed.external',
-          external: {
-            uri: '', // BlueSky may not support direct video upload; placeholder
-            title: 'Video reposted from Mastodon',
-            description: '',
-            thumb: upload.data.blob,
-          },
-        };
-      }
+      uploaded.push({
+        $type: 'app.bsky.embed.images#image',
+        image: upload.data.blob,
+        alt: 'Media reposted from Mastodon',
+      });
     }
-    if (uploaded.length > 0) {
-      embed = {
-        $type: 'app.bsky.embed.images',
-        images: uploaded,
-      };
-    }
+    embed = {
+      $type: 'app.bsky.embed.images',
+      images: uploaded,
+    };
   }
 
   await agent.post({
